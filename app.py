@@ -6,167 +6,143 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image
 
-# --- CONFIGURATION ---
 app = Flask(__name__)
-# Allow access from your frontend running on localhost (or Vercel/Netlify)
-CORS(app) 
+CORS(app)
 
-# --- MOCK CLASSIFICATION DATA ---
-# This dictionary contains comprehensive data for all waste types.
-# The keys correspond to possible detected materials from an actual ML model.
+# Minimal mock WASTE_DATA (expand this with your real classes)
 WASTE_DATA = {
-    "Plastic Bottle (PET)": {
+    "plastic_bottle": {
+        "name": "Plastic Bottle",
         "category": "Recyclable",
-        "bin_color": "Blue",
-        "color": "blue",
-        "instructions": "Rinse thoroughly, remove the cap, and flatten the bottle before placing in the recycling bin. Caps are often recycled separately.",
+        "recycling_instructions": "Rinse and place in PET recycling.",
     },
-    "Aluminum Can": {
+    "battery": {
+        "name": "Battery",
+        "category": "Hazardous - E-Waste",
+        "recycling_instructions": "Do not throw in general waste. Take to e-waste collection.",
+    },
+    "food_scraps": {
+        "name": "Food Scraps",
+        "category": "General Waste / Compostable",
+        "recycling_instructions": "Compost where available.",
+    },
+    "glass_bottle": {
+        "name": "Glass Bottle",
         "category": "Recyclable",
-        "bin_color": "Blue",
-        "color": "blue",
-        "instructions": "Rinse out all food residue. Do not crush the can entirely, as automatic sorters may mistake crushed cans for general waste.",
-    },
-    "Cardboard Box": {
-        "category": "Recyclable",
-        "bin_color": "Brown",
-        "color": "yellow",
-        "instructions": "Flatten the box completely. Remove all tape and shipping labels. If greasy (like a pizza box), tear off clean parts and put the greasy part in general waste.",
-    },
-    "Newspaper/Magazine": {
-        "category": "Recyclable",
-        "bin_color": "Blue",
-        "color": "blue",
-        "instructions": "Keep dry. Place loose in the recycling bin. Do not tie with string or put in plastic bags.",
-    },
-    "Banana Peel/Fruit Scraps": {
-        "category": "Organic/Compostable",
-        "bin_color": "Green",
-        "color": "green",
-        "instructions": "Place directly into the compost bin or dedicated green waste bin. Do not include any packaging.",
-    },
-    "Used Batteries (AA/AAA)": {
-        "category": "Hazardous/E-Waste",
-        "bin_color": "Special Collection",
-        "color": "red",
-        "instructions": "Tape the terminals to prevent short circuits. Take to a specialized collection point (e.g., library, municipality center, or retail store drop-off).",
-    },
-    "Light Bulb (Incandescent)": {
-        "category": "General Waste",
-        "bin_color": "Black/Gray",
-        "color": "gray",
-        "instructions": "Wrap in paper or a plastic bag to prevent injury from broken glass and place carefully in the general waste bin.",
-    },
-    "Plastic Film/Bags": {
-        "category": "General Waste",
-        "bin_color": "Black/Gray",
-        "color": "gray",
-        "instructions": "Plastic films and bags jam recycling machinery. Dispose of in general waste, or check for specific local drop-off points.",
+        "recycling_instructions": "Rinse and recycle glass.",
     },
 }
 
-# --- CORE ANALYSIS FUNCTION (MOCK IMPLEMENTATION) ---
+ALL_MATERIALS = list(WASTE_DATA.keys())
 
-def classify_image_mock(image_bytes):
+# Confidence threshold: if best detection confidence < threshold, treat as "not a waste item".
+# Default 0.70, but override with environment variable WASTE_CONFIDENCE_THRESHOLD (0.0 - 1.0).
+try:
+    WASTE_CONFIDENCE_THRESHOLD = float(os.environ.get("WASTE_CONFIDENCE_THRESHOLD", "0.70"))
+except Exception:
+    WASTE_CONFIDENCE_THRESHOLD = 0.70
+
+def load_image_from_file(file_storage):
+    """Load PIL Image from Flask file storage"""
+    try:
+        img = Image.open(file_storage.stream)
+        img.verify()
+        file_storage.stream.seek(0)
+        img = Image.open(file_storage.stream).convert("RGB")
+        return img
+    except Exception:
+        raise ValueError("Uploaded file is not a valid image")
+
+def load_image_from_base64(b64_string):
+    """Load PIL Image from base64 string (data URL or raw)"""
+    try:
+        if b64_string.startswith("data:"):
+            b64_string = b64_string.split(",", 1)[1]
+        decoded = base64.b64decode(b64_string)
+        img = Image.open(io.BytesIO(decoded)).convert("RGB")
+        return img
+    except Exception:
+        raise ValueError("Base64 string is not a valid image")
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"success": True, "message": "OK"}), 200
+
+@app.route("/classify", methods=["POST"])
+def classify():
     """
-    Mocks the object detection and classification result.
-    This function returns the *exact* JSON structure required by the frontend.
+    Accepts:
+      - multipart/form-data with field 'image' (file)
+      - or JSON { "image_base64": "<base64-data-or-data-url>" }
+    Returns:
+      - If no confident waste detection: {"success": False, "message": "No waste item detected."}
+      - Otherwise returns detection details.
     """
     try:
-        # Simulate successful image opening (a basic sanity check)
-        Image.open(io.BytesIO(image_bytes))
-        
-        # 1. Simulate Detected Items (2 to 4 unique items)
-        all_materials = list(WASTE_DATA.keys())
-        # Randomly select between 2 and 4 unique items
-        num_detections = random.randint(2, 4)
-        detected_materials = random.sample(all_materials, k=num_detections)
+        img = None
+        if "image" in request.files:
+            file = request.files["image"]
+            img = load_image_from_file(file)
+        else:
+            data = request.get_json(silent=True) or {}
+            b64 = data.get("image_base64") or request.form.get("image_base64")
+            if b64:
+                img = load_image_from_base64(b64)
 
-        # 2. Build the final structured result
-        materials_output = []
-        summary = {"recyclable_items": 0, "hazardous_items": 0, "general_waste_items": 0}
-        
-        for material_name in detected_materials:
-            data = WASTE_DATA[material_name]
-            
-            # Update summary counts
-            if data['category'] == 'Recyclable':
-                summary['recyclable_items'] += 1
-            elif 'Hazardous' in data['category'] or 'E-Waste' in data['category']:
-                summary['hazardous_items'] += 1
-            else: # Includes General Waste/Organic
-                summary['general_waste_items'] += 1
+        if img is None:
+            return jsonify({"success": False, "message": "No image provided. Send 'image' file or JSON with 'image_base64'."}), 400
 
-            materials_output.append({
-                "detected_material": material_name,
-                "confidence": random.uniform(0.75, 0.99), # Mock confidence
-                "classification": {
-                    "category": data['category'],
-                    "bin_color": data['bin_color'],
-                    "color": data['color'],
-                    "instructions": data['instructions'],
-                }
+        # ----- MOCK DETECTION LOGIC -----
+        # Simulate detection: produce 1-3 candidates with confidences
+        num_candidates = random.randint(1, min(3, len(ALL_MATERIALS)))
+        candidates = random.sample(ALL_MATERIALS, k=num_candidates)
+
+        # Mock confidences (in real model, use actual confidences)
+        materials = []
+        for name in candidates:
+            materials.append({
+                "id": name,
+                "display_name": WASTE_DATA.get(name, {}).get("name", name),
+                "category": WASTE_DATA.get(name, {}).get("category", "Unknown"),
+                "recycling_instructions": WASTE_DATA.get(name, {}).get("recycling_instructions", ""),
+                "confidence": round(random.uniform(0.40, 0.99), 2)  # allow some low confidences to simulate non-waste
             })
 
-        final_result = {
+        # Find the highest-confidence candidate
+        best = max(materials, key=lambda m: m["confidence"])
+        best_conf = best["confidence"]
+
+        # If best confidence is below threshold => treat as non-waste (do NOT return materials details)
+        if best_conf < WASTE_CONFIDENCE_THRESHOLD:
+            # Respond in a way the client can easily detect "not a waste item"
+            # We return success=False and a clear message. No material details are included.
+            return jsonify({"success": False, "message": "No waste item detected."}), 200
+
+        # Otherwise construct normal result including only candidates above a minimal filter (optional)
+        # (Here we include all; you can filter by per-material min confidence if desired.)
+        results = {
             "success": True,
-            "message": "Classification successful.",
-            "total_materials_detected": len(materials_output),
-            "summary": summary,
-            "materials": materials_output
-        }
-        
-        # Simulate ML processing delay for realism
-        import time
-        time.sleep(1.0) 
-        
-        return final_result
-
-    except Exception as e:
-        print(f"Server-side error during mock classification: {e}")
-        return {
-            "success": False,
-            "message": f"Server processing failed (Error: {e}). Ensure the input file is a valid image.",
-            "total_materials_detected": 0,
+            "detected_count": len(materials),
+            "materials": materials,
             "summary": {"recyclable_items": 0, "hazardous_items": 0, "general_waste_items": 0},
-            "materials": []
         }
 
-# --- API ROUTE ---
-
-@app.route('/classify_waste', methods=['POST'])
-def classify_waste_api():
-    """ Handles file upload and calls the classification function. """
-    # 1. Check for file presence
-    if 'file' not in request.files:
-        return jsonify({"success": False, "message": "No file part in the request"}), 400
-    
-    file = request.files['file']
-    
-    if file.filename == '':
-        return jsonify({"success": False, "message": "No selected file"}), 400
-
-    if file:
-        try:
-            # Read image data directly from the file stream
-            image_bytes = file.read()
-            
-            # Call the mock classifier
-            results = classify_image_mock(image_bytes)
-            
-            # Return JSON results
-            if results['success']:
-                return jsonify(results), 200
+        for m in materials:
+            cat = m.get("category", "")
+            if "Recyclable" in cat:
+                results["summary"]["recyclable_items"] += 1
+            elif "Hazardous" in cat or "E-Waste" in cat:
+                results["summary"]["hazardous_items"] += 1
             else:
-                return jsonify(results), 500
+                results["summary"]["general_waste_items"] += 1
 
-        except Exception as e:
-            return jsonify({"success": False, "message": f"Internal Server Error during file reading: {e}"}), 500
+        return jsonify(results), 200
 
+    except ValueError as ve:
+        return jsonify({"success": False, "message": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Server error: {e}"}), 500
 
-# --- RUN SERVER ---
-
-if __name__ == '__main__':
-    # Flask will run on http://0.0.0.0:5000 by default (for local testing)
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
