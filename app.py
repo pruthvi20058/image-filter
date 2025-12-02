@@ -68,8 +68,8 @@ def load_image_from_base64(b64_string):
 def health():
     return jsonify({"success": True, "message": "OK"}), 200
 
-@app.route("/classify", methods=["POST"])
-def classify():
+@app.route('/classify_waste', methods=['POST'])
+def classify_waste_api():
     """
     Accepts:
       - multipart/form-data with field 'image' (file)
